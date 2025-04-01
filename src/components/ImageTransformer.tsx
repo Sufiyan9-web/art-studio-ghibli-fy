@@ -62,7 +62,9 @@ class TransformationCache {
   }
 }
 
+// Constants
 const REPLICATE_API_URL = "https://api.replicate.com/v1/predictions";
+const DEFAULT_API_KEY = "r8_8Se5gV4HA9LzeP6EoNNRr3wGceD0slv4KaRIN";
 
 const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => {
   const [originalUrl, setOriginalUrl] = useState<string>("");
@@ -70,7 +72,7 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isTransformed, setIsTransformed] = useState<boolean>(false);
   const [apiKey, setApiKey] = useState<string>(() => {
-    return localStorage.getItem("replicateApiKey") || "";
+    return localStorage.getItem("replicateApiKey") || DEFAULT_API_KEY;
   });
   const [showApiKeyInput, setShowApiKeyInput] = useState<boolean>(false);
   const [isOptimized, setIsOptimized] = useState<boolean>(true);
@@ -87,6 +89,11 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
         setTransformedUrl(cachedUrl);
         setIsTransformed(true);
         toast.success("Image loaded from cache!");
+      } else {
+        // Auto-transform if we have an API key
+        if (apiKey) {
+          handleTransform();
+        }
       }
     };
 
@@ -118,6 +125,7 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
     }
 
     setIsLoading(true);
+    toast.info("Starting image transformation...");
     
     try {
       // Optimize image before sending if enabled
@@ -147,7 +155,9 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
       });
 
       if (!response.ok) {
-        throw new Error(`API request failed: ${response.status}`);
+        const errorData = await response.json().catch(() => ({}));
+        console.error("API error response:", errorData);
+        throw new Error(`API request failed: ${response.status}${errorData.detail ? ' - ' + errorData.detail : ''}`);
       }
 
       const prediction = await response.json();
@@ -164,11 +174,11 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
         
         toast.success("Your image has been Ghibli-fied!");
       } else {
-        throw new Error("Image transformation failed");
+        throw new Error(`Image transformation failed: ${result.error || 'Unknown error'}`);
       }
     } catch (error) {
-      console.error(error);
-      toast.error("Failed to transform image. Please check your API key and try again.");
+      console.error("Transformation error:", error);
+      toast.error(`Failed to transform image: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsLoading(false);
     }
