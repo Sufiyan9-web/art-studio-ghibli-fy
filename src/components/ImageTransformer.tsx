@@ -5,65 +5,15 @@ import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Wand2, Download, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
+import { ImageCache } from "@/utils/imageCache";
+import { optimizeImage, fileToBase64, transformToGhibli, pollForResult } from "@/utils/imageTransformation";
 
 interface ImageTransformerProps {
   originalImage: File;
   onReset: () => void;
 }
 
-// Cache for transformed images to avoid redundant API calls
-interface CacheItem {
-  hash: string;
-  url: string;
-}
-
-// Create a simple local cache system
-class TransformationCache {
-  private static cache: Map<string, string> = new Map();
-  private static MAX_CACHE_ITEMS = 20;
-
-  static generateHash(file: File): Promise<string> {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const result = e.target?.result;
-        if (typeof result === "string") {
-          // Simple hash function based on the first 10KB of the file
-          const sample = result.slice(0, 10240);
-          let hash = 0;
-          for (let i = 0; i < sample.length; i++) {
-            hash = ((hash << 5) - hash) + sample.charCodeAt(i);
-            hash |= 0; // Convert to 32bit integer
-          }
-          resolve(`${hash}-${file.size}-${file.type}`);
-        } else {
-          resolve(`${file.name}-${file.size}-${file.lastModified}`);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-
-  static async get(file: File): Promise<string | null> {
-    const hash = await this.generateHash(file);
-    return this.cache.get(hash) || null;
-  }
-
-  static async set(file: File, url: string): Promise<void> {
-    const hash = await this.generateHash(file);
-    
-    // Manage cache size using simple LRU approach
-    if (this.cache.size >= this.MAX_CACHE_ITEMS) {
-      const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
-    }
-    
-    this.cache.set(hash, url);
-  }
-}
-
 // Constants
-const REPLICATE_API_URL = "https://api.replicate.com/v1/predictions";
 const DEFAULT_API_KEY = "r8_8Se5gV4HA9LzeP6EoNNRr3wGceD0slv4KaRIN";
 
 const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => {
@@ -84,7 +34,7 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
 
     // Check cache for this image first
     const checkCache = async () => {
-      const cachedUrl = await TransformationCache.get(originalImage);
+      const cachedUrl = await ImageCache.get(originalImage);
       if (cachedUrl) {
         setTransformedUrl(cachedUrl);
         setIsTransformed(true);
@@ -116,7 +66,7 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
     localStorage.setItem("replicateApiKey", apiKey);
 
     // Check cache first
-    const cachedUrl = await TransformationCache.get(originalImage);
+    const cachedUrl = await ImageCache.get(originalImage);
     if (cachedUrl) {
       setTransformedUrl(cachedUrl);
       setIsTransformed(true);
@@ -128,175 +78,29 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
     toast.info("Starting image transformation...");
     
     try {
-      // Optimize image before sending if enabled
-      const optimizedImage = isOptimized 
-        ? await optimizeImageForUpload(originalImage) 
-        : originalImage;
+      // Step 1: Send the image to the API and get prediction ID
+      const predictionId = await transformToGhibli(originalImage, apiKey, isOptimized);
       
-      // Convert the image to base64
-      const base64Image = await fileToBase64(optimizedImage);
+      // Step 2: Poll for the result
+      const result = await pollForResult(predictionId, apiKey);
       
-      // Call the Replicate API with the Ghibli model
-      const response = await fetch(REPLICATE_API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Token ${apiKey}`,
-        },
-        body: JSON.stringify({
-          version: "ad59ca21177f9e217b9075e7300cf6e14f7e5b4505b478b3a1700d1ccd3d8517",
-          input: {
-            image: base64Image,
-            prompt: "Studio Ghibli style, Hayao Miyazaki",
-            negative_prompt: "bad quality, low quality",
-            num_inference_steps: isOptimized ? 20 : 30 // Fewer steps for optimized mode
-          }
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error("API error response:", errorData);
-        throw new Error(`API request failed: ${response.status}${errorData.detail ? ' - ' + errorData.detail : ''}`);
-      }
-
-      const prediction = await response.json();
-      
-      // Poll for results
-      const result = await pollForResult(prediction.id, apiKey);
-      
-      if (result.status === "succeeded") {
+      if (result.output) {
         setTransformedUrl(result.output);
         setIsTransformed(true);
         
         // Store in cache
-        await TransformationCache.set(originalImage, result.output);
+        await ImageCache.set(originalImage, result.output);
         
         toast.success("Your image has been Ghibli-fied!");
       } else {
-        throw new Error(`Image transformation failed: ${result.error || 'Unknown error'}`);
+        throw new Error("No output received from the API");
       }
     } catch (error) {
       console.error("Transformation error:", error);
-      toast.error(`Failed to transform image: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      toast.error(`Failed to transform image: ${error instanceof Error ? error.message : 'API connection error'}`);
     } finally {
       setIsLoading(false);
     }
-  };
-
-  // Optimize image by reducing size/quality before upload
-  const optimizeImageForUpload = async (file: File): Promise<File> => {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      
-      img.onload = () => {
-        // Target dimensions - reduce to max 800x800 for efficiency
-        const MAX_SIZE = 800;
-        let width = img.width;
-        let height = img.height;
-        
-        if (width > height) {
-          if (width > MAX_SIZE) {
-            height = Math.round(height * (MAX_SIZE / width));
-            width = MAX_SIZE;
-          }
-        } else {
-          if (height > MAX_SIZE) {
-            width = Math.round(width * (MAX_SIZE / height));
-            height = MAX_SIZE;
-          }
-        }
-        
-        canvas.width = width;
-        canvas.height = height;
-        
-        if (!ctx) {
-          reject(new Error("Failed to get canvas context"));
-          return;
-        }
-        
-        // Draw resized image
-        ctx.drawImage(img, 0, 0, width, height);
-        
-        // Convert to Blob with reduced quality
-        canvas.toBlob(
-          (blob) => {
-            if (!blob) {
-              reject(new Error("Failed to create blob"));
-              return;
-            }
-            
-            const optimizedFile = new File([blob], file.name, {
-              type: 'image/jpeg',
-              lastModified: Date.now(),
-            });
-            
-            resolve(optimizedFile);
-          },
-          'image/jpeg',
-          0.85  // Quality 0.85 is a good balance
-        );
-      };
-      
-      img.onerror = () => reject(new Error("Failed to load image"));
-      img.src = URL.createObjectURL(file);
-    });
-  };
-
-  // Convert file to base64
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        if (typeof reader.result === "string") {
-          resolve(reader.result);
-        } else {
-          reject(new Error("Failed to convert file to base64"));
-        }
-      };
-      reader.onerror = (error) => reject(error);
-    });
-  };
-
-  // Poll for result with exponential backoff
-  const pollForResult = async (id: string, apiKey: string): Promise<any> => {
-    let result;
-    let attempts = 0;
-    let backoff = 2000; // Start with 2 seconds
-    const maxBackoff = 15000; // Maximum 15 seconds between attempts
-    const maxAttempts = 30; // Reduced max attempts for efficiency
-
-    while (attempts < maxAttempts) {
-      const response = await fetch(`${REPLICATE_API_URL}/${id}`, {
-        headers: {
-          Authorization: `Token ${apiKey}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to check prediction status: ${response.status}`);
-      }
-
-      result = await response.json();
-
-      if (result.status === "succeeded" || result.status === "failed") {
-        break;
-      }
-
-      // Wait with exponential backoff
-      await new Promise(resolve => setTimeout(resolve, backoff));
-      backoff = Math.min(backoff * 1.5, maxBackoff);
-      attempts++;
-    }
-
-    if (attempts >= maxAttempts) {
-      throw new Error("Prediction timed out");
-    }
-
-    return result;
   };
 
   const handleDownload = () => {
