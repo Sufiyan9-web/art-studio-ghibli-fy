@@ -3,12 +3,63 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { Wand2, Download, Loader2 } from "lucide-react";
+import { Wand2, Download, Loader2, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface ImageTransformerProps {
   originalImage: File;
   onReset: () => void;
+}
+
+// Cache for transformed images to avoid redundant API calls
+interface CacheItem {
+  hash: string;
+  url: string;
+}
+
+// Create a simple local cache system
+class TransformationCache {
+  private static cache: Map<string, string> = new Map();
+  private static MAX_CACHE_ITEMS = 20;
+
+  static generateHash(file: File): Promise<string> {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const result = e.target?.result;
+        if (typeof result === "string") {
+          // Simple hash function based on the first 10KB of the file
+          const sample = result.slice(0, 10240);
+          let hash = 0;
+          for (let i = 0; i < sample.length; i++) {
+            hash = ((hash << 5) - hash) + sample.charCodeAt(i);
+            hash |= 0; // Convert to 32bit integer
+          }
+          resolve(`${hash}-${file.size}-${file.type}`);
+        } else {
+          resolve(`${file.name}-${file.size}-${file.lastModified}`);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  static async get(file: File): Promise<string | null> {
+    const hash = await this.generateHash(file);
+    return this.cache.get(hash) || null;
+  }
+
+  static async set(file: File, url: string): Promise<void> {
+    const hash = await this.generateHash(file);
+    
+    // Manage cache size using simple LRU approach
+    if (this.cache.size >= this.MAX_CACHE_ITEMS) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    
+    this.cache.set(hash, url);
+  }
 }
 
 const REPLICATE_API_URL = "https://api.replicate.com/v1/predictions";
@@ -18,13 +69,28 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
   const [transformedUrl, setTransformedUrl] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isTransformed, setIsTransformed] = useState<boolean>(false);
-  const [apiKey, setApiKey] = useState<string>("");
+  const [apiKey, setApiKey] = useState<string>(() => {
+    return localStorage.getItem("replicateApiKey") || "";
+  });
   const [showApiKeyInput, setShowApiKeyInput] = useState<boolean>(false);
+  const [isOptimized, setIsOptimized] = useState<boolean>(true);
 
   useEffect(() => {
     // Create object URL for the original image
     const url = URL.createObjectURL(originalImage);
     setOriginalUrl(url);
+
+    // Check cache for this image first
+    const checkCache = async () => {
+      const cachedUrl = await TransformationCache.get(originalImage);
+      if (cachedUrl) {
+        setTransformedUrl(cachedUrl);
+        setIsTransformed(true);
+        toast.success("Image loaded from cache!");
+      }
+    };
+
+    checkCache();
 
     // Clean up the URL when component unmounts
     return () => {
@@ -39,11 +105,28 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
       return;
     }
 
+    // Save API key to localStorage
+    localStorage.setItem("replicateApiKey", apiKey);
+
+    // Check cache first
+    const cachedUrl = await TransformationCache.get(originalImage);
+    if (cachedUrl) {
+      setTransformedUrl(cachedUrl);
+      setIsTransformed(true);
+      toast.success("Using cached transformation!");
+      return;
+    }
+
     setIsLoading(true);
     
     try {
+      // Optimize image before sending if enabled
+      const optimizedImage = isOptimized 
+        ? await optimizeImageForUpload(originalImage) 
+        : originalImage;
+      
       // Convert the image to base64
-      const base64Image = await fileToBase64(originalImage);
+      const base64Image = await fileToBase64(optimizedImage);
       
       // Call the Replicate API with the Ghibli model
       const response = await fetch(REPLICATE_API_URL, {
@@ -58,7 +141,7 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
             image: base64Image,
             prompt: "Studio Ghibli style, Hayao Miyazaki",
             negative_prompt: "bad quality, low quality",
-            num_inference_steps: 30
+            num_inference_steps: isOptimized ? 20 : 30 // Fewer steps for optimized mode
           }
         }),
       });
@@ -75,6 +158,10 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
       if (result.status === "succeeded") {
         setTransformedUrl(result.output);
         setIsTransformed(true);
+        
+        // Store in cache
+        await TransformationCache.set(originalImage, result.output);
+        
         toast.success("Your image has been Ghibli-fied!");
       } else {
         throw new Error("Image transformation failed");
@@ -85,6 +172,67 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Optimize image by reducing size/quality before upload
+  const optimizeImageForUpload = async (file: File): Promise<File> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      img.onload = () => {
+        // Target dimensions - reduce to max 800x800 for efficiency
+        const MAX_SIZE = 800;
+        let width = img.width;
+        let height = img.height;
+        
+        if (width > height) {
+          if (width > MAX_SIZE) {
+            height = Math.round(height * (MAX_SIZE / width));
+            width = MAX_SIZE;
+          }
+        } else {
+          if (height > MAX_SIZE) {
+            width = Math.round(width * (MAX_SIZE / height));
+            height = MAX_SIZE;
+          }
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        
+        if (!ctx) {
+          reject(new Error("Failed to get canvas context"));
+          return;
+        }
+        
+        // Draw resized image
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // Convert to Blob with reduced quality
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error("Failed to create blob"));
+              return;
+            }
+            
+            const optimizedFile = new File([blob], file.name, {
+              type: 'image/jpeg',
+              lastModified: Date.now(),
+            });
+            
+            resolve(optimizedFile);
+          },
+          'image/jpeg',
+          0.85  // Quality 0.85 is a good balance
+        );
+      };
+      
+      img.onerror = () => reject(new Error("Failed to load image"));
+      img.src = URL.createObjectURL(file);
+    });
   };
 
   // Convert file to base64
@@ -103,11 +251,13 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
     });
   };
 
-  // Poll for result
+  // Poll for result with exponential backoff
   const pollForResult = async (id: string, apiKey: string): Promise<any> => {
     let result;
     let attempts = 0;
-    const maxAttempts = 60; // 5 minutes with 5-second intervals
+    let backoff = 2000; // Start with 2 seconds
+    const maxBackoff = 15000; // Maximum 15 seconds between attempts
+    const maxAttempts = 30; // Reduced max attempts for efficiency
 
     while (attempts < maxAttempts) {
       const response = await fetch(`${REPLICATE_API_URL}/${id}`, {
@@ -126,8 +276,9 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
         break;
       }
 
-      // Wait 5 seconds before checking again
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      // Wait with exponential backoff
+      await new Promise(resolve => setTimeout(resolve, backoff));
+      backoff = Math.min(backoff * 1.5, maxBackoff);
       attempts++;
     }
 
@@ -213,7 +364,23 @@ const ImageTransformer = ({ originalImage, onReset }: ImageTransformerProps) => 
         </Card>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 justify-center mt-8">
+      <div className="mt-4 mb-4 bg-muted/30 p-3 rounded-lg">
+        <div className="flex items-center gap-2">
+          <Settings2 size={16} className="text-muted-foreground" />
+          <h4 className="text-sm font-medium">Performance Settings</h4>
+        </div>
+        <div className="flex items-center gap-2 mt-2">
+          <input 
+            type="checkbox" 
+            id="optimize" 
+            checked={isOptimized}
+            onChange={() => setIsOptimized(!isOptimized)} 
+          />
+          <label htmlFor="optimize" className="text-sm">Optimize for high traffic (faster but slightly lower quality)</label>
+        </div>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-4 justify-center mt-4">
         <Button
           variant="outline"
           onClick={onReset}
