@@ -1,3 +1,4 @@
+
 import type { Config } from "tailwindcss";
 
 export default {
@@ -61,6 +62,19 @@ export default {
 					'accent-foreground': 'hsl(var(--sidebar-accent-foreground))',
 					border: 'hsl(var(--sidebar-border))',
 					ring: 'hsl(var(--sidebar-ring))'
+				},
+				// Ghibli-themed colors
+				ghibli: {
+					sky: '#8ECAE6',
+					blue: '#219EBC',
+					navy: '#023047',
+					amber: '#FFB703',
+					orange: '#FB8500',
+					forest: '#4A6C6F',
+					meadow: '#99A799',
+					cream: '#F9F7F3',
+					clay: '#D8C3A5',
+					dust: '#8E9196'
 				}
 			},
 			borderRadius: {
@@ -84,11 +98,35 @@ export default {
 					to: {
 						height: '0'
 					}
+				},
+				'float': {
+					'0%, 100%': {
+						transform: 'translateY(0)'
+					},
+					'50%': {
+						transform: 'translateY(-10px)'
+					}
+				},
+				'fade-in': {
+					from: {
+						opacity: '0',
+						transform: 'translateY(10px)'
+					},
+					to: {
+						opacity: '1',
+						transform: 'translateY(0)'
+					}
 				}
 			},
 			animation: {
 				'accordion-down': 'accordion-down 0.2s ease-out',
-				'accordion-up': 'accordion-up 0.2s ease-out'
+				'accordion-up': 'accordion-up 0.2s ease-out',
+				'float': 'float 6s ease-in-out infinite',
+				'fade-in': 'fade-in 0.6s ease-out'
+			},
+			fontFamily: {
+				serif: ['Lora', 'Georgia', 'serif'],
+				sans: ['Inter', 'system-ui', 'sans-serif']
 			}
 		}
 	},
